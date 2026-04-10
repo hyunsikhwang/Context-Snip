@@ -1,0 +1,5 @@
+{
+  "name": "Remix: 보험사 손해율/지급여력비율 추출기",
+  "description": "PDF 파일에서 \u0027보험사 손해율\u0027 및 \u0027지급여력비율\u0027 테이블을 추출하여 일관된 형식으로 출력합니다.",
+  "requestFramePermissions": []
+}

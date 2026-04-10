@@ -1,0 +1,30 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-rga-red: #D10000;
+  --color-rga-purple: #5A236F;
+  --color-rga-dark-blue: #2B639E;
+  --color-rga-green: #2E9C8C;
+  --color-rga-warm-gray: #E8E5E3;
+  --color-rga-warm-gray-shade: #A49992;
+  --color-rga-blue-shade: #75AED5;
+  --color-rga-orange: #FA631A;
+  --color-rga-yellow: #FFB51C;
+  --color-rga-blue: #AECFE6;
+}
+
+@layer base {
+  table {
+    @apply w-full border-collapse border border-rga-blue-shade my-4;
+  }
+  th {
+    @apply bg-rga-warm-gray border border-rga-blue-shade p-3 text-left font-semibold text-sm text-black;
+  }
+  td {
+    @apply border border-rga-blue-shade p-3 text-sm;
+  }
+  tr:nth-child(even) {
+    @apply bg-white;
+  }
+}
