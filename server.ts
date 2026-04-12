@@ -18,10 +18,42 @@ if (typeof pdfParse === 'function') {
   pdf = pdfParse;
 } else if (pdfParse && typeof pdfParse.default === 'function') {
   pdf = pdfParse.default;
+} else if (pdfParse && typeof pdfParse.pdf === 'function') {
+  pdf = pdfParse.pdf;
 } else {
-  // If it's still not a function, try to find any function in the object
-  pdf = pdfParse; 
+  // If pdfParse itself is an object containing internal classes/functions
+  // we need to be careful not to pick up a class constructor.
+  pdf = pdfParse;
 }
+
+// Ensure it's a function before calling, or fallback to a dummy that logs
+const safePdf = async (buffer: Buffer, options?: any) => {
+  // If pdf is an object but not a function, check if it has a callable property
+  let callablePdf = pdf;
+  if (typeof callablePdf !== 'function' && callablePdf !== null && typeof callablePdf === 'object') {
+    if (typeof callablePdf.default === 'function') callablePdf = callablePdf.default;
+    else if (typeof callablePdf.pdf === 'function') callablePdf = callablePdf.pdf;
+  }
+
+  if (typeof callablePdf !== 'function') {
+    console.error("PDF parse is not a function. Current value type:", typeof callablePdf);
+    throw new Error("PDF library initialization failed: pdf-parse is not a function");
+  }
+  
+  try {
+    return await callablePdf(buffer, options);
+  } catch (err: any) {
+    // If it's a "Class constructor cannot be invoked without 'new'" error, 
+    // it means we picked up a class instead of the main function.
+    if (err.message && err.message.includes("constructor")) {
+       console.error("Picked up a class instead of a function for pdf-parse. Attempting to find the correct function...");
+       // Try to find a function in the object that isn't a class (though this is hard in JS)
+       // Usually pdf-parse is just the function itself or .default
+       throw new Error("PDF library configuration error: Picked up a class constructor.");
+    }
+    throw err;
+  }
+};
 import { PDFDocument } from "pdf-lib";
 
 async function startServer() {
@@ -47,12 +79,15 @@ async function startServer() {
 
       // 1. Identify relevant pages using pdf-parse
       const pageScores = new Map<number, number>();
+      const pageTexts = new Map<number, string>();
       const searchKeywords = keywords || ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "경과조치"];
       
-      await pdf(buffer, {
+      await safePdf(buffer, {
         pagerender: (pageData: any) => {
           return pageData.getTextContent().then((textContent: any) => {
             const text = textContent.items.map((item: any) => item.str).join(" ");
+            pageTexts.set(pageData.pageIndex + 1, text);
+            
             let score = 0;
             searchKeywords.forEach((kw: string) => {
               if (text.includes(kw)) score += 1;
@@ -76,35 +111,54 @@ async function startServer() {
       const totalPages = srcDoc.getPageCount();
       
       // Sort pages by score and proximity
-      // We want to keep pages with keywords and their immediate neighbors
       const pagesToExtract = new Set<number>();
       
-      // Limit to top N relevant areas to keep tokens low
       const sortedRelevantPages = Array.from(pageScores.keys()).sort((a, b) => a - b);
       
-      // If we found too many pages, we might be hitting footers. 
-      // Let's limit to the most relevant ones (highest score) if it exceeds a threshold.
       let targetPages = sortedRelevantPages;
       if (sortedRelevantPages.length > 10) {
         targetPages = Array.from(pageScores.entries())
-          .sort((a, b) => b[1] - a[1]) // Sort by score descending
-          .slice(0, 10) // Take top 10 scoring pages
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 10)
           .map(entry => entry[0])
           .sort((a, b) => a - b);
       }
 
       targetPages.forEach(p => {
         const idx = p - 1;
-        // Add current page and 1 page after (tables often span 2 pages)
         pagesToExtract.add(idx);
         if (idx < totalPages - 1) pagesToExtract.add(idx + 1);
-        // Also add 1 page before just in case
         if (idx > 0) pagesToExtract.add(idx - 1);
       });
 
-      // Final safety limit: never send more than 20 pages
       const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 20);
       
+      // Collect text from final pages to check if it's searchable
+      let combinedText = "";
+      let totalKeywordScore = 0;
+      finalPages.forEach(idx => {
+        const text = pageTexts.get(idx + 1) || "";
+        combinedText += text + "\n";
+        totalKeywordScore += pageScores.get(idx + 1) || 0;
+      });
+
+      // Improved isScanned detection:
+      // 1. Check total text length
+      const textLength = combinedText.trim().length;
+      // 2. Check alphanumeric ratio (to filter out garbage OCR)
+      const alphaNumCount = combinedText.replace(/[^a-zA-Z0-9가-힣]/g, "").length;
+      const alphaNumRatio = textLength > 0 ? alphaNumCount / textLength : 0;
+      // 3. Check word count
+      const wordCount = combinedText.trim().split(/\s+/).filter(w => w.length > 1).length;
+
+      // A PDF is considered searchable (NOT scanned) if:
+      // - It has enough meaningful text (length > 300 and alphaNumRatio > 0.5)
+      // - OR it has very strong keyword matches (totalKeywordScore > 3)
+      const isSearchable = (textLength > 300 && alphaNumRatio > 0.5 && wordCount > 50) || (totalKeywordScore > 3);
+      const isScanned = !isSearchable;
+
+      console.log(`PDF Detection [${isScanned ? "SCANNED" : "SEARCHABLE"}]: Length=${textLength}, Ratio=${alphaNumRatio.toFixed(2)}, Words=${wordCount}, Score=${totalKeywordScore}`);
+
       const copiedPages = await pdfDoc.copyPages(srcDoc, finalPages);
       copiedPages.forEach(page => pdfDoc.addPage(page));
 
@@ -114,6 +168,8 @@ async function startServer() {
       res.json({ 
         base64: optimizedBase64, 
         optimized: true, 
+        isScanned,
+        extractedText: isScanned ? null : combinedText,
         originalPageCount: totalPages,
         optimizedPageCount: finalPages.length,
         extractedPages: finalPages.map(p => p + 1)
@@ -137,7 +193,7 @@ async function startServer() {
       if (typeof pdf !== 'function') {
         throw new Error("PDF library loading error");
       }
-      const data = await pdf(buffer);
+      const data = await safePdf(buffer);
       res.json({ text: data.text });
     } catch (error: any) {
       console.error("PDF text extraction error:", error);

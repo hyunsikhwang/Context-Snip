@@ -29,6 +29,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [errorLog, setErrorLog] = useState<string[]>([]);
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
+  const [processingHistory, setProcessingHistory] = useState<{ fileName: string; mode: 'text' | 'image' | 'error' }[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("gemini-3-flash-preview");
   const [usageStats, setUsageStats] = useState<{
     totalTokens: number;
@@ -55,6 +56,7 @@ export default function App() {
     setError(null);
     setErrorLog([]);
     setProcessingStatus(null);
+    setProcessingHistory([]);
     setUsageStats({
       totalTokens: 0,
       promptTokens: 0,
@@ -240,6 +242,9 @@ export default function App() {
         let file = targetFiles[i];
         
         // --- 0. Optimize PDF (Extract relevant pages) ---
+        let extractedText: string | null = null;
+        let isScanned = true;
+
         try {
           setProcessingStatus(`PDF 최적화 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
           const optRes = await fetch("/api/optimize-pdf", {
@@ -259,6 +264,8 @@ export default function App() {
                 ...file,
                 base64: optData.base64
               };
+              extractedText = optData.extractedText;
+              isScanned = optData.isScanned;
             }
           }
         } catch (optErr) {
@@ -267,7 +274,7 @@ export default function App() {
 
         // --- 1. Combined Extraction (Loss Ratio & Solvency Ratio) ---
         try {
-          setProcessingStatus(`데이터 추출 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
+          setProcessingStatus(`${isScanned ? '이미지 분석' : '텍스트 분석'} 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
 
           const model = selectedModel;
           
@@ -296,19 +303,32 @@ export default function App() {
 |---|---|---|---|---|---|---|
 ...데이터...`;
 
-          const contents = [
-            {
-              parts: [
-                { text: combinedPrompt },
-                {
-                  inlineData: {
-                    data: file.base64,
-                    mimeType: file.mimeType,
+          let contents;
+          if (!isScanned && extractedText) {
+            // Use text mode for searchable PDFs
+            contents = [
+              {
+                parts: [
+                  { text: `아래 텍스트 내용에서 정보를 추출해주세요.\n\n${combinedPrompt}\n\n[텍스트 내용]\n${extractedText}` },
+                ],
+              },
+            ];
+          } else {
+            // Use multimodal mode for scanned PDFs
+            contents = [
+              {
+                parts: [
+                  { text: combinedPrompt },
+                  {
+                    inlineData: {
+                      data: file.base64,
+                      mimeType: file.mimeType,
+                    },
                   },
-                },
-              ],
-            },
-          ];
+                ],
+              },
+            ];
+          }
 
           let response;
           try {
@@ -354,6 +374,7 @@ export default function App() {
 
           const result = response.text;
           if (result) {
+            setProcessingHistory(prev => [...prev, { fileName: file.name, mode: isScanned ? 'image' : 'text' }]);
             // Parse combined result
             const lossRatioMatch = result.match(/### LOSS_RATIO_TABLE\n([\s\S]*?)(?=\n### SOLVENCY_RATIO_TABLE|$)/);
             const solvencyMatch = result.match(/### SOLVENCY_RATIO_TABLE\n([\s\S]*)/);
@@ -425,6 +446,7 @@ export default function App() {
           }
         } catch (err: any) {
           console.error(`Extraction error for ${file.name}:`, err);
+          setProcessingHistory(prev => [...prev, { fileName: file.name, mode: 'error' }]);
           setErrorLog(prev => [...prev, `[추출 실패] ${file.name}: ${err.message}`]);
         }
       }
@@ -815,6 +837,64 @@ export default function App() {
                 </div>
               </section>
             </div>
+          )}
+
+          {/* Processing History Section */}
+          {processingHistory.length > 0 && (
+            <motion.section
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-12 bg-white rounded-2xl shadow-md border-2 border-rga-warm-gray p-6"
+            >
+              <div className="flex items-center gap-2 mb-4">
+                <FileText className="text-rga-dark-blue" size={20} />
+                <h2 className="text-lg font-bold text-rga-dark-blue">문서별 처리 방식 리스트</h2>
+              </div>
+              <div className="overflow-hidden rounded-xl border border-rga-warm-gray">
+                <table className="w-full text-sm text-left">
+                  <thead className="bg-rga-warm-gray/50 text-rga-warm-gray-shade uppercase text-[10px] font-bold tracking-wider">
+                    <tr>
+                      <th className="px-4 py-3">파일명</th>
+                      <th className="px-4 py-3">처리 방식</th>
+                      <th className="px-4 py-3">상태</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-rga-warm-gray">
+                    {processingHistory.map((item, idx) => (
+                      <tr key={idx} className="hover:bg-rga-warm-gray/20 transition-colors">
+                        <td className="px-4 py-3 font-medium text-rga-dark-blue truncate max-w-xs md:max-w-md">
+                          {item.fileName}
+                        </td>
+                        <td className="px-4 py-3">
+                          {item.mode === 'text' ? (
+                            <span className="inline-flex items-center gap-1 text-rga-blue font-semibold">
+                              <Cpu size={14} /> 텍스트 분석
+                            </span>
+                          ) : item.mode === 'image' ? (
+                            <span className="inline-flex items-center gap-1 text-rga-red font-semibold">
+                              <Zap size={14} /> 이미지 분석
+                            </span>
+                          ) : (
+                            <span className="text-rga-warm-gray-shade">-</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {item.mode === 'error' ? (
+                            <span className="inline-flex items-center gap-1 text-red-500 font-bold">
+                              <AlertCircle size={14} /> 실패
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-green-600 font-bold">
+                              완료
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </motion.section>
           )}
         </div>
 
