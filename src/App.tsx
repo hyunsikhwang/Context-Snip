@@ -149,30 +149,45 @@ export default function App() {
     const fetchedFiles: FileData[] = [];
 
     try {
+      const fetchWithRetry = async (url: string, retries = 3, delay = 2000): Promise<FileData[]> => {
+        for (let i = 0; i < retries; i++) {
+          try {
+            const response = await fetch(`/api/fetch-pdf?url=${encodeURIComponent(url)}`);
+            const contentType = response.headers.get("content-type");
+            
+            if (contentType && contentType.includes("application/json")) {
+              const data = await response.json();
+              if (response.ok) {
+                return data.files || [];
+              }
+              throw new Error(data.error || "파일을 가져오는데 실패했습니다.");
+            } else {
+              const text = await response.text();
+              if (text.includes("Starting Server")) {
+                console.log(`Server starting, retrying... (${i + 1}/${retries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+              }
+              throw new Error("서버에서 올바르지 않은 응답(HTML)을 받았습니다.");
+            }
+          } catch (err: any) {
+            if (i === retries - 1) throw err;
+            console.log(`Fetch failed, retrying... (${i + 1}/${retries}): ${err.message}`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+        return [];
+      };
+
       for (let i = 0; i < urls.length; i++) {
         const url = urls[i];
         setProcessingStatus(`파일 가져오는 중 (${i + 1}/${urls.length})...`);
         
         try {
-          const response = await fetch(`/api/fetch-pdf?url=${encodeURIComponent(url)}`);
-          
-          let data;
-          const contentType = response.headers.get("content-type");
-          if (contentType && contentType.includes("application/json")) {
-            data = await response.json();
-          } else {
-            const text = await response.text();
-            console.error("Non-JSON response received:", text.substring(0, 200));
-            throw new Error("서버에서 올바르지 않은 응답(HTML)을 받았습니다. 사이트 접근이 차단되었거나 세션이 만료되었을 수 있습니다.");
-          }
-
-          if (!response.ok) {
-            throw new Error(data.error || "파일을 가져오는데 실패했습니다.");
-          }
-
-          if (data.files && Array.isArray(data.files)) {
-            fetchedFiles.push(...data.files);
-            setFiles((prev) => [...prev, ...data.files]);
+          const files = await fetchWithRetry(url);
+          if (files && files.length > 0) {
+            fetchedFiles.push(...files);
+            setFiles((prev) => [...prev, ...files]);
           }
         } catch (err: any) {
           console.error(`Error fetching ${url}:`, err);
@@ -184,7 +199,6 @@ export default function App() {
 
       setUrlInput("");
       
-      // After fetching all, if we have new files, start extraction sequentially
       if (fetchedFiles.length > 0) {
         await extractSequentially(fetchedFiles);
       }
@@ -215,7 +229,6 @@ export default function App() {
         totalCandidatesTokens += c;
         
         // Pricing based on model (Gemini 3.1 Flash Lite)
-        // Flash Lite: Input $0.01/1M, Output $0.03/1M
         const inputRate = 0.00000001;
         const outputRate = 0.00000003;
         
@@ -230,48 +243,45 @@ export default function App() {
         }));
       }
     };
-    
+
     try {
       for (let i = 0; i < targetFiles.length; i++) {
         let file = targetFiles[i];
         
-        // --- 0. Optimize PDF (Extract relevant pages) ---
-        let extractedText: string | null = null;
-        let isScanned = true;
-
-        try {
-          setProcessingStatus(`PDF 최적화 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
-          const optRes = await fetch("/api/optimize-pdf", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-              base64: file.base64,
-              keywords: ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "공통적용 경과조치"]
-            })
-          });
-          
-          if (optRes.ok) {
-            const optData = await optRes.json();
-            if (optData.optimized) {
-              console.log(`Optimized ${file.name}: ${optData.originalPageCount} pages -> ${optData.optimizedPageCount} pages (${optData.extractedPages.join(", ")})`);
-              file = {
-                ...file,
-                base64: optData.base64
-              };
-              extractedText = optData.extractedText;
-              isScanned = optData.isScanned;
-            }
-          }
-        } catch (optErr) {
-          console.error("Optimization failed, continuing with original:", optErr);
+        // Add a delay between files to avoid hitting rate limits (RPM)
+        if (i > 0) {
+          setProcessingStatus(`다음 파일 대기 중... (Rate Limit 방지)`);
+          await new Promise(resolve => setTimeout(resolve, 5000)); // 5 second delay between files
         }
 
-        // --- 1. Combined Extraction (Loss Ratio & Solvency Ratio) ---
         try {
-          setProcessingStatus(`${isScanned ? '이미지 분석' : '텍스트 분석'} 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
+          setProcessingStatus(`분석 준비 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
+          
+          // --- 0. Optimize PDF (Extract relevant pages) ---
+          try {
+            const optRes = await fetch("/api/optimize-pdf", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ 
+                base64: file.base64,
+                keywords: ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "공통적용 경과조치"]
+              })
+            });
+            
+            if (optRes.ok) {
+              const optData = await optRes.json();
+              if (optData.optimized) {
+                file = { ...file, base64: optData.base64 };
+              }
+            }
+          } catch (optErr) {
+            console.error("Optimization failed:", optErr);
+          }
+
+          // --- 1. Combined Extraction (Always use Multimodal/Image path) ---
+          setProcessingStatus(`이미지 분석 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
 
           const model = selectedModel;
-          
           const combinedPrompt = `업로드된 PDF 파일에서 다음 두 가지 테이블을 각각 추출해주세요.
 
 1. 보험금 예실차비율 테이블
@@ -297,96 +307,69 @@ export default function App() {
 |---|---|---|---|---|---|---|
 ...데이터...`;
 
-          let contents;
-          if (!isScanned && extractedText) {
-            // Use text mode for searchable PDFs
-            contents = [
-              {
-                parts: [
-                  { text: `아래 텍스트 내용에서 정보를 추출해주세요.\n\n${combinedPrompt}\n\n[텍스트 내용]\n${extractedText}` },
-                ],
-              },
-            ];
-          } else {
-            // Use multimodal mode for scanned PDFs
-            contents = [
-              {
-                parts: [
-                  { text: combinedPrompt },
-                  {
-                    inlineData: {
-                      data: file.base64,
-                      mimeType: file.mimeType,
-                    },
+          // Always use multimodal mode for better accuracy with tables
+          const contents = [
+            {
+              parts: [
+                { text: combinedPrompt },
+                {
+                  inlineData: {
+                    data: file.base64,
+                    mimeType: file.mimeType,
                   },
-                ],
-              },
-            ];
-          }
-
-          let response;
-          try {
-            response = await genAI.models.generateContent({
-              model,
-              contents,
-              config: {
-                systemInstruction: "You are a professional data extractor. Extract the requested tables from the PDF and output them in the specified markdown format. Do not include any other text.",
-                thinkingConfig: {
-                  thinkingLevel: model.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
                 },
-                maxOutputTokens: 16384,
-              },
-            });
-            updateUsage(response);
-          } catch (apiErr: any) {
-            const errMessage = apiErr.message || (apiErr.error?.message) || String(apiErr);
-            const errStr = JSON.stringify(apiErr);
-            
-            if (errMessage.includes("token") || errMessage.includes("limit") || errMessage.includes("1048576") || errMessage.includes("INVALID_ARGUMENT") || errStr.includes("token") || errStr.includes("limit") || errStr.includes("1048576") || errStr.includes("INVALID_ARGUMENT")) {
-              setProcessingStatus(`토큰 초과: ${file.name} (텍스트 추출 모드)`);
-              const textRes = await fetch("/api/extract-text", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ base64: file.base64 })
-              });
-              if (!textRes.ok) throw apiErr;
-              const textData = await textRes.json();
-              if (textData.text) {
-                response = await genAI.models.generateContent({
-                  model,
-                  contents: [{ parts: [{ text: `아래 텍스트에서 정보를 추출해주세요.\n\n${combinedPrompt}\n\n[텍스트 내용]\n${textData.text.substring(0, 800000)}` }] }],
+              ],
+            },
+          ];
+
+          // Helper for Gemini API with retry
+          const generateWithRetry = async (modelName: string, content: any, retries = 5, initialDelay = 5000) => {
+            for (let attempt = 0; attempt < retries; attempt++) {
+              try {
+                const res = await genAI.models.generateContent({
+                  model: modelName,
+                  contents: content,
                   config: {
-                    systemInstruction: "You are a professional data extractor. Extract the requested tables from the text.",
-                    thinkingConfig: { thinkingLevel: model.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW },
+                    systemInstruction: "You are a professional data extractor. Extract the requested tables from the PDF and output them in the specified markdown format. Do not include any other text.",
+                    thinkingConfig: { thinkingLevel: modelName.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW },
                     maxOutputTokens: 16384,
                   },
                 });
-                updateUsage(response);
-              } else throw apiErr;
-            } else throw apiErr;
-          }
+                return res;
+              } catch (apiErr: any) {
+                const errMessage = apiErr.message || "";
+                const isRateLimit = errMessage.includes("429") || errMessage.includes("QUOTA_EXCEEDED") || errMessage.includes("quota");
+                const isTransient = errMessage.includes("503") || errMessage.includes("UNAVAILABLE") || errMessage.includes("Deadline expired") || errMessage.includes("500") || errMessage.includes("INTERNAL");
+                
+                if ((isRateLimit || isTransient) && attempt < retries - 1) {
+                  const waitTime = isRateLimit ? (10000 * Math.pow(2, attempt)) : (initialDelay * Math.pow(2, attempt));
+                  const reason = isRateLimit ? "할당량 초과" : "서버 지연/불안정";
+                  setProcessingStatus(`${reason}, 재시도 대기 중... (${waitTime/1000}초)`);
+                  await new Promise(resolve => setTimeout(resolve, waitTime));
+                  continue;
+                }
+                throw apiErr;
+              }
+            }
+          };
+
+          const response: any = await generateWithRetry(model, contents);
+          updateUsage(response);
 
           const result = response.text;
           if (result) {
-            setProcessingHistory(prev => [...prev, { fileName: file.name, mode: isScanned ? 'image' : 'text' }]);
-            // Parse combined result
+            setProcessingHistory(prev => [...prev, { fileName: file.name, mode: 'image' }]);
+            
             const lossRatioMatch = result.match(/### LOSS_RATIO_TABLE\n([\s\S]*?)(?=\n### SOLVENCY_RATIO_TABLE|$)/);
             const solvencyMatch = result.match(/### SOLVENCY_RATIO_TABLE\n([\s\S]*)/);
 
             const cleanTableLine = (line: string, type: 'loss' | 'solvency') => {
               if (!line.includes('|')) return line;
               const cells = line.split('|');
-              const cleanedCells = cells.map((cell, index) => {
+              const cleanedCells = cells.map((cell, idx) => {
                 const trimmed = cell.trim();
                 if (trimmed === "" || trimmed.includes('---')) return cell;
-                
-                // Common cleaning
                 let val = trimmed.replace(/%/g, '').replace(/\+/g, '').replace(/\(([\d.]+)\)/g, '-$1').replace(/△/g, '-').replace(/년/g, '').trim();
-                
-                if (type === 'loss' && index === 1) return ` ${val} `;
-                if (type === 'loss' && index >= 3) return ` ${val} `;
-                if (type === 'solvency' && index >= 3) return ` ${val} `;
-                
                 return ` ${val} `;
               });
               return cleanedCells.join('|');
@@ -396,7 +379,7 @@ export default function App() {
               const tableContent = lossRatioMatch[1].trim();
               setExtractedTable((prev) => {
                 const newLines = tableContent.split('\n');
-                let dataStartIndex = 0;
+                let dataStartIndex = -1;
                 for (let j = 0; j < newLines.length; j++) {
                   const line = newLines[j].trim();
                   if (line.startsWith('|') && !line.includes('---') && !line.includes('구분(연도)') && !line.includes('회사명')) {
@@ -404,7 +387,7 @@ export default function App() {
                     break;
                   }
                 }
-                const dataLines = newLines.slice(dataStartIndex).filter(l => l.trim() !== "" && l.includes('|') && !l.includes('---')).map(l => cleanTableLine(l, 'loss'));
+                const dataLines = dataStartIndex === -1 ? [] : newLines.slice(dataStartIndex).filter(l => l.trim() !== "" && l.includes('|') && !l.includes('---')).map(l => cleanTableLine(l, 'loss'));
                 if (dataLines.length === 0) return prev;
                 
                 if (!prev) {
@@ -419,7 +402,7 @@ export default function App() {
               const tableContent = solvencyMatch[1].trim();
               setExtractedSolvencyTable((prev) => {
                 const newLines = tableContent.split('\n');
-                let dataStartIndex = 0;
+                let dataStartIndex = -1;
                 for (let j = 0; j < newLines.length; j++) {
                   const line = newLines[j].trim();
                   if (line.startsWith('|') && !line.includes('---') && !line.includes('회사명') && !line.includes('구분(경과조치)')) {
@@ -427,7 +410,7 @@ export default function App() {
                     break;
                   }
                 }
-                const dataLines = newLines.slice(dataStartIndex).filter(l => l.trim() !== "" && l.includes('|') && !l.includes('---')).map(l => cleanTableLine(l, 'solvency'));
+                const dataLines = dataStartIndex === -1 ? [] : newLines.slice(dataStartIndex).filter(l => l.trim() !== "" && l.includes('|') && !l.includes('---')).map(l => cleanTableLine(l, 'solvency'));
                 if (dataLines.length === 0) return prev;
 
                 if (!prev) {

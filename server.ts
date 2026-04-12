@@ -12,6 +12,11 @@ import iconv from "iconv-lite";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
+
+// Handle pdf-lib with require to avoid ESM constructor issues
+const pdflib = require("pdf-lib");
+const PDFDocument = pdflib.PDFDocument;
+
 // Handle different export patterns for pdf-parse
 let pdf: any;
 if (typeof pdfParse === 'function') {
@@ -20,9 +25,10 @@ if (typeof pdfParse === 'function') {
   pdf = pdfParse.default;
 } else if (pdfParse && typeof pdfParse.pdf === 'function') {
   pdf = pdfParse.pdf;
+} else if (pdfParse && pdfParse.__esModule && typeof pdfParse.default === 'function') {
+  pdf = pdfParse.default;
 } else {
-  // If it's an object, it might be the pdfjs object or a wrapper.
-  // We'll try to find the function later in safePdf.
+  // Fallback: if it's an object, try to find any function property that might be the main entry
   pdf = pdfParse;
 }
 
@@ -30,19 +36,30 @@ if (typeof pdfParse === 'function') {
 const safePdf = async (buffer: Buffer, options?: any) => {
   let callablePdf = pdf;
   
-  // If not a function, check common properties
+  // If not a function, check common properties again at runtime
   if (typeof callablePdf !== 'function' && callablePdf !== null && typeof callablePdf === 'object') {
     if (typeof callablePdf.default === 'function') callablePdf = callablePdf.default;
     else if (typeof callablePdf.pdf === 'function') callablePdf = callablePdf.pdf;
+    else {
+      // Last resort: find the first function in the object
+      const firstFuncKey = Object.keys(callablePdf).find(key => typeof callablePdf[key] === 'function');
+      if (firstFuncKey) callablePdf = callablePdf[firstFuncKey];
+    }
   }
 
   if (typeof callablePdf !== 'function') {
+    console.error("PDF library failure. Module structure:", JSON.stringify(Object.keys(pdfParse)));
     throw new Error("PDF library initialization failed: The loaded module is not a function.");
   }
   
-  return await callablePdf(buffer, options);
+  try {
+    return await callablePdf(buffer, options);
+  } catch (err) {
+    console.error("pdf-parse error:", err);
+    // Fallback: return empty text if pdf-parse fails
+    return { text: "" };
+  }
 };
-import { PDFDocument } from "pdf-lib";
 
 async function startServer() {
   const app = express();
@@ -63,7 +80,19 @@ async function startServer() {
       // 1. Identify relevant pages using pdf-parse
       const pageScores = new Map<number, number>();
       const pageTexts = new Map<number, string>();
-      const searchKeywords = keywords || ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "경과조치"];
+      const searchKeywords = keywords || [
+        "보험금 예실차비율", 
+        "지급여력비율", 
+        "K-ICS", 
+        "최적가정", 
+        "공통적용 경과조치", 
+        "손해율", 
+        "가용자본", 
+        "요구자본",
+        "보험금예실차",
+        "경과조치 전",
+        "경과조치 후"
+      ];
       
       await safePdf(buffer, {
         pagerender: (pageData: any) => {
@@ -73,7 +102,10 @@ async function startServer() {
             
             let score = 0;
             searchKeywords.forEach((kw: string) => {
-              if (text.includes(kw)) score += 1;
+              // Use regex for better matching
+              const regex = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+              const matches = text.match(regex);
+              if (matches) score += matches.length;
             });
             
             if (score > 0) {
@@ -93,28 +125,26 @@ async function startServer() {
       const pdfDoc = await PDFDocument.create();
       const totalPages = srcDoc.getPageCount();
       
-      // Sort pages by score and proximity
+      // Sort pages by score
+      const sortedRelevantPages = Array.from(pageScores.entries())
+        .sort((a, b) => b[1] - a[1]);
+      
       const pagesToExtract = new Set<number>();
       
-      const sortedRelevantPages = Array.from(pageScores.keys()).sort((a, b) => a - b);
+      // Take top 8 most relevant pages
+      const topPages = sortedRelevantPages.slice(0, 8).map(entry => entry[0]);
       
-      let targetPages = sortedRelevantPages;
-      if (sortedRelevantPages.length > 10) {
-        targetPages = Array.from(pageScores.entries())
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 10)
-          .map(entry => entry[0])
-          .sort((a, b) => a - b);
-      }
-
-      targetPages.forEach(p => {
+      topPages.forEach(p => {
         const idx = p - 1;
         pagesToExtract.add(idx);
+        // Add one page after as tables often span multiple pages
         if (idx < totalPages - 1) pagesToExtract.add(idx + 1);
+        // Proactively add one page before for context if it's not already there
         if (idx > 0) pagesToExtract.add(idx - 1);
       });
 
-      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 20);
+      // Limit to 15 pages total to keep token usage low and processing fast
+      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 15);
       
       // Collect text from final pages to check if it's searchable
       let combinedText = "";
@@ -202,11 +232,12 @@ async function startServer() {
       const response = await axios.get(url, {
         responseType: "arraybuffer",
         maxRedirects: 10,
-        timeout: 60000, // Increase to 60 seconds
+        timeout: 120000, // Increase to 120 seconds
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
           "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+          "Accept-Encoding": "identity", // Avoid compression issues
           "Referer": referer,
           "Origin": origin,
           "Cache-Control": "no-cache",
@@ -218,7 +249,7 @@ async function startServer() {
           "Sec-Fetch-User": "?1",
           "Connection": "keep-alive"
         },
-        validateStatus: (status) => status >= 200 && status < 400, // Only accept success and redirects
+        validateStatus: (status) => status >= 200 && status < 400,
       });
 
       const dataBuffer = Buffer.from(response.data);
