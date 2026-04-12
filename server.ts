@@ -13,12 +13,83 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdfLib = require("pdf-parse");
 const pdf = typeof pdfLib === 'function' ? pdfLib : (pdfLib && typeof pdfLib.default === 'function' ? pdfLib.default : pdfLib);
+import { PDFDocument } from "pdf-lib";
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json({ limit: '50mb' }));
+
+  // API Route to optimize PDF by extracting only relevant pages
+  app.post("/api/optimize-pdf", async (req, res) => {
+    const { base64, keywords } = req.body;
+    if (!base64) {
+      return res.status(400).json({ error: "Base64 data is required" });
+    }
+
+    try {
+      const buffer = Buffer.from(base64, 'base64');
+      
+      // 1. Identify relevant pages using pdf-parse
+      const relevantPages = new Set<number>();
+      const searchKeywords = keywords || ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "경과조치"];
+      
+      await pdf(buffer, {
+        pagerender: (pageData: any) => {
+          return pageData.getTextContent().then((textContent: any) => {
+            const text = textContent.items.map((item: any) => item.str).join(" ");
+            const hasKeyword = searchKeywords.some((kw: string) => text.includes(kw));
+            if (hasKeyword) {
+              relevantPages.add(pageData.pageIndex + 1); // pdf-lib uses 0-based or 1-based? Let's check. pdf-lib uses 0-based for indices.
+            }
+            return text;
+          });
+        }
+      });
+
+      if (relevantPages.size === 0) {
+        // If no keywords found, maybe it's a scanned PDF or keywords are slightly different.
+        // Return original or first few pages? 
+        // For now, let's return original if nothing found to avoid breaking flow.
+        return res.json({ base64, optimized: false, message: "No keywords found, returning original." });
+      }
+
+      // 2. Extract pages using pdf-lib
+      const srcDoc = await PDFDocument.load(buffer);
+      const pdfDoc = await PDFDocument.create();
+      
+      // Add a buffer of 1 page before and after for context
+      const pagesToExtract = new Set<number>();
+      const totalPages = srcDoc.getPageCount();
+      
+      relevantPages.forEach(p => {
+        const idx = p - 1;
+        if (idx > 0) pagesToExtract.add(idx - 1);
+        pagesToExtract.add(idx);
+        if (idx < totalPages - 1) pagesToExtract.add(idx + 1);
+      });
+
+      const sortedPages = Array.from(pagesToExtract).sort((a, b) => a - b);
+      const copiedPages = await pdfDoc.copyPages(srcDoc, sortedPages);
+      copiedPages.forEach(page => pdfDoc.addPage(page));
+
+      const optimizedPdfBytes = await pdfDoc.save();
+      const optimizedBase64 = Buffer.from(optimizedPdfBytes).toString('base64');
+
+      res.json({ 
+        base64: optimizedBase64, 
+        optimized: true, 
+        originalPageCount: totalPages,
+        optimizedPageCount: sortedPages.length,
+        extractedPages: sortedPages.map(p => p + 1)
+      });
+    } catch (error: any) {
+      console.error("PDF optimization error:", error);
+      // Fallback to original if optimization fails
+      res.json({ base64, optimized: false, error: error.message });
+    }
+  });
 
   // API Route to extract text from PDF base64
   app.post("/api/extract-text", async (req, res) => {

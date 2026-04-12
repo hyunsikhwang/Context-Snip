@@ -179,8 +179,34 @@ export default function App() {
     
     try {
       for (let i = 0; i < targetFiles.length; i++) {
-        const file = targetFiles[i];
+        let file = targetFiles[i];
         
+        // --- 0. Optimize PDF (Extract relevant pages) ---
+        try {
+          setProcessingStatus(`PDF 최적화 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
+          const optRes = await fetch("/api/optimize-pdf", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              base64: file.base64,
+              keywords: ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "경과조치", "경영지표"]
+            })
+          });
+          
+          if (optRes.ok) {
+            const optData = await optRes.json();
+            if (optData.optimized) {
+              console.log(`Optimized ${file.name}: ${optData.originalPageCount} pages -> ${optData.optimizedPageCount} pages (${optData.extractedPages.join(", ")})`);
+              file = {
+                ...file,
+                base64: optData.base64
+              };
+            }
+          }
+        } catch (optErr) {
+          console.error("Optimization failed, continuing with original:", optErr);
+        }
+
         // --- 1. Extract Loss Ratio Data ---
         try {
           setProcessingStatus(`손해율 데이터 추출 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
@@ -625,6 +651,9 @@ export default function App() {
                       <p className="animate-pulse font-medium text-rga-dark-blue">
                         {processingStatus || "처리 중..."}
                       </p>
+                      <p className="text-[10px] mt-1 text-rga-green font-medium">
+                        {processingStatus?.includes("최적화") ? "토큰 절약을 위해 관련 페이지만 추출 중입니다." : "대용량 PDF는 자동으로 최적화되어 처리됩니다."}
+                      </p>
                       <p className="text-xs mt-1">잠시만 기다려주세요.</p>
                     </div>
                   </div>
@@ -665,6 +694,10 @@ export default function App() {
                       <p className="animate-pulse font-medium text-rga-dark-blue">
                         {processingStatus || "처리 중..."}
                       </p>
+                      <p className="text-[10px] mt-1 text-rga-green font-medium">
+                        {processingStatus?.includes("최적화") ? "토큰 절약을 위해 관련 페이지만 추출 중입니다." : "대용량 PDF는 자동으로 최적화되어 처리됩니다."}
+                      </p>
+                      <p className="text-xs mt-1">잠시만 기다려주세요.</p>
                     </div>
                   </div>
                 ) : extractedSolvencyTable ? (
