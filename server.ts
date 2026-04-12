@@ -21,38 +21,26 @@ if (typeof pdfParse === 'function') {
 } else if (pdfParse && typeof pdfParse.pdf === 'function') {
   pdf = pdfParse.pdf;
 } else {
-  // If pdfParse itself is an object containing internal classes/functions
-  // we need to be careful not to pick up a class constructor.
+  // If it's an object, it might be the pdfjs object or a wrapper.
+  // We'll try to find the function later in safePdf.
   pdf = pdfParse;
 }
 
 // Ensure it's a function before calling, or fallback to a dummy that logs
 const safePdf = async (buffer: Buffer, options?: any) => {
-  // If pdf is an object but not a function, check if it has a callable property
   let callablePdf = pdf;
+  
+  // If not a function, check common properties
   if (typeof callablePdf !== 'function' && callablePdf !== null && typeof callablePdf === 'object') {
     if (typeof callablePdf.default === 'function') callablePdf = callablePdf.default;
     else if (typeof callablePdf.pdf === 'function') callablePdf = callablePdf.pdf;
   }
 
   if (typeof callablePdf !== 'function') {
-    console.error("PDF parse is not a function. Current value type:", typeof callablePdf);
-    throw new Error("PDF library initialization failed: pdf-parse is not a function");
+    throw new Error("PDF library initialization failed: The loaded module is not a function.");
   }
   
-  try {
-    return await callablePdf(buffer, options);
-  } catch (err: any) {
-    // If it's a "Class constructor cannot be invoked without 'new'" error, 
-    // it means we picked up a class instead of the main function.
-    if (err.message && err.message.includes("constructor")) {
-       console.error("Picked up a class instead of a function for pdf-parse. Attempting to find the correct function...");
-       // Try to find a function in the object that isn't a class (though this is hard in JS)
-       // Usually pdf-parse is just the function itself or .default
-       throw new Error("PDF library configuration error: Picked up a class constructor.");
-    }
-    throw err;
-  }
+  return await callablePdf(buffer, options);
 };
 import { PDFDocument } from "pdf-lib";
 
@@ -72,11 +60,6 @@ async function startServer() {
     try {
       const buffer = Buffer.from(base64, 'base64');
       
-      if (typeof pdf !== 'function') {
-        console.error("PDF function is not a function. Type:", typeof pdf, "Value:", pdf);
-        return res.json({ base64, optimized: false, message: "PDF library loading error." });
-      }
-
       // 1. Identify relevant pages using pdf-parse
       const pageScores = new Map<number, number>();
       const pageTexts = new Map<number, string>();
@@ -190,9 +173,6 @@ async function startServer() {
 
     try {
       const buffer = Buffer.from(base64, 'base64');
-      if (typeof pdf !== 'function') {
-        throw new Error("PDF library loading error");
-      }
       const data = await safePdf(buffer);
       res.json({ text: data.text });
     } catch (error: any) {

@@ -30,7 +30,7 @@ export default function App() {
   const [errorLog, setErrorLog] = useState<string[]>([]);
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
   const [processingHistory, setProcessingHistory] = useState<{ fileName: string; mode: 'text' | 'image' | 'error' }[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>("gemini-3-flash-preview");
+  const selectedModel = "gemini-3.1-flash-lite-preview";
   const [usageStats, setUsageStats] = useState<{
     totalTokens: number;
     promptTokens: number;
@@ -214,16 +214,10 @@ export default function App() {
         totalPromptTokens += p;
         totalCandidatesTokens += c;
         
-        // Pricing based on model (Gemini 3 series)
-        // Flash: Input $0.075/1M, Output $0.30/1M
+        // Pricing based on model (Gemini 3.1 Flash Lite)
         // Flash Lite: Input $0.01/1M, Output $0.03/1M
-        let inputRate = 0.000000075; 
-        let outputRate = 0.00000030;
-        
-        if (selectedModel.includes("lite")) {
-          inputRate = 0.00000001;
-          outputRate = 0.00000003;
-        }
+        const inputRate = 0.00000001;
+        const outputRate = 0.00000003;
         
         const currentCost = (totalPromptTokens * inputRate) + (totalCandidatesTokens * outputRate);
         
@@ -497,28 +491,11 @@ export default function App() {
                 {/* URL Input Group */}
                 <div className="flex-1 flex flex-col gap-3">
                   <div className="flex items-center gap-4 px-1">
-                    <span className="text-xs font-bold text-rga-dark-blue uppercase tracking-wider">AI 모델 선택:</span>
-                    <div className="flex bg-rga-warm-gray p-1 rounded-lg gap-1">
-                      <button
-                        onClick={() => setSelectedModel("gemini-3-flash-preview")}
-                        className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
-                          selectedModel === "gemini-3-flash-preview"
-                            ? "bg-white text-rga-red shadow-sm"
-                            : "text-rga-warm-gray-shade hover:text-rga-dark-blue"
-                        }`}
-                      >
-                        <Zap size={14} /> Flash (기본)
-                      </button>
-                      <button
-                        onClick={() => setSelectedModel("gemini-3.1-flash-lite-preview")}
-                        className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
-                          selectedModel === "gemini-3.1-flash-lite-preview"
-                            ? "bg-white text-rga-blue shadow-sm"
-                            : "text-rga-warm-gray-shade hover:text-rga-dark-blue"
-                        }`}
-                      >
-                        <Cpu size={14} /> Flash Lite (속도/제한 우회)
-                      </button>
+                    <span className="text-xs font-bold text-rga-dark-blue uppercase tracking-wider">AI 모델:</span>
+                    <div className="flex bg-rga-warm-gray p-1 rounded-lg">
+                      <div className="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-white text-rga-blue shadow-sm">
+                        <Cpu size={14} /> Gemini 3.1 Flash Lite
+                      </div>
                     </div>
                   </div>
                   <div className="relative flex-1">
