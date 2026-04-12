@@ -30,6 +30,21 @@ export default function App() {
   const [errorLog, setErrorLog] = useState<string[]>([]);
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>("gemini-3-flash-preview");
+  const [usageStats, setUsageStats] = useState<{
+    totalTokens: number;
+    promptTokens: number;
+    candidatesTokens: number;
+    cost: number;
+    startTime: number | null;
+    endTime: number | null;
+  }>({
+    totalTokens: 0,
+    promptTokens: 0,
+    candidatesTokens: 0,
+    cost: 0,
+    startTime: null,
+    endTime: null
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleClear = () => {
@@ -40,6 +55,14 @@ export default function App() {
     setError(null);
     setErrorLog([]);
     setProcessingStatus(null);
+    setUsageStats({
+      totalTokens: 0,
+      promptTokens: 0,
+      candidatesTokens: 0,
+      cost: 0,
+      startTime: null,
+      endTime: null
+    });
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -176,6 +199,41 @@ export default function App() {
   const extractSequentially = async (targetFiles: FileData[]) => {
     setIsExtracting(true);
     setError(null);
+    const startTime = Date.now();
+    setUsageStats(prev => ({ ...prev, startTime, endTime: null }));
+    
+    let totalPromptTokens = 0;
+    let totalCandidatesTokens = 0;
+
+    const updateUsage = (response: any) => {
+      if (response.usageMetadata) {
+        const p = response.usageMetadata.promptTokenCount || 0;
+        const c = response.usageMetadata.candidatesTokenCount || 0;
+        totalPromptTokens += p;
+        totalCandidatesTokens += c;
+        
+        // Pricing based on model (Gemini 3 series)
+        // Flash: Input $0.075/1M, Output $0.30/1M
+        // Flash Lite: Input $0.01/1M, Output $0.03/1M
+        let inputRate = 0.000000075; 
+        let outputRate = 0.00000030;
+        
+        if (selectedModel.includes("lite")) {
+          inputRate = 0.00000001;
+          outputRate = 0.00000003;
+        }
+        
+        const currentCost = (totalPromptTokens * inputRate) + (totalCandidatesTokens * outputRate);
+        
+        setUsageStats(prev => ({
+          ...prev,
+          promptTokens: totalPromptTokens,
+          candidatesTokens: totalCandidatesTokens,
+          totalTokens: totalPromptTokens + totalCandidatesTokens,
+          cost: currentCost
+        }));
+      }
+    };
     
     try {
       for (let i = 0; i < targetFiles.length; i++) {
@@ -253,6 +311,7 @@ export default function App() {
                 maxOutputTokens: 16384,
               },
             });
+            updateUsage(response);
           } catch (apiErr: any) {
             const errMessage = apiErr.message || (apiErr.error?.message) || String(apiErr);
             const errStr = JSON.stringify(apiErr);
@@ -277,6 +336,7 @@ export default function App() {
                     maxOutputTokens: 16384,
                   },
                 });
+                updateUsage(response);
               } else throw apiErr;
             } else throw apiErr;
           }
@@ -356,6 +416,7 @@ export default function App() {
                 maxOutputTokens: 16384,
               },
             });
+            updateUsage(response);
           } catch (apiErr: any) {
             const errMessage = apiErr.message || (apiErr.error?.message) || String(apiErr);
             const errStr = JSON.stringify(apiErr);
@@ -378,6 +439,7 @@ export default function App() {
                     maxOutputTokens: 16384,
                   },
                 });
+                updateUsage(response);
               } else throw apiErr;
             } else throw apiErr;
           }
@@ -436,6 +498,7 @@ export default function App() {
     } finally {
       setIsExtracting(false);
       setProcessingStatus(null);
+      setUsageStats(prev => ({ ...prev, endTime: Date.now() }));
     }
   };
 
@@ -628,6 +691,37 @@ export default function App() {
           {/* Bottom Section: Result */}
           <div className="w-full space-y-6">
             {/* Loss Ratio Table */}
+            <AnimatePresence>
+              {usageStats.endTime && (
+                <motion.section
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  className="bg-rga-warm-gray/20 rounded-2xl border-2 border-rga-blue-shade p-4 flex flex-wrap items-center justify-center gap-x-8 gap-y-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-rga-warm-gray-shade uppercase tracking-widest">총 소요 시간</span>
+                    <span className="text-sm font-bold text-rga-dark-blue">
+                      {((usageStats.endTime - (usageStats.startTime || 0)) / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="w-px h-4 bg-rga-blue-shade/30 hidden sm:block" />
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-rga-warm-gray-shade uppercase tracking-widest">총 사용 토큰</span>
+                    <span className="text-sm font-bold text-rga-dark-blue">
+                      {usageStats.totalTokens.toLocaleString()} <span className="text-[10px] font-normal opacity-60">(In: {usageStats.promptTokens.toLocaleString()} / Out: {usageStats.candidatesTokens.toLocaleString()})</span>
+                    </span>
+                  </div>
+                  <div className="w-px h-4 bg-rga-blue-shade/30 hidden sm:block" />
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-rga-warm-gray-shade uppercase tracking-widest">예상 비용 ({selectedModel.includes("lite") ? "Flash Lite" : "Flash"})</span>
+                    <span className="text-sm font-bold text-rga-red">
+                      ${usageStats.cost.toFixed(4)}
+                    </span>
+                  </div>
+                </motion.section>
+              )}
+            </AnimatePresence>
+
             <section className="bg-white rounded-2xl shadow-md border-2 border-rga-warm-gray min-h-[150px] flex flex-col overflow-hidden">
               <div className="p-4 bg-rga-dark-blue flex items-center justify-between">
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-white flex items-center gap-2">

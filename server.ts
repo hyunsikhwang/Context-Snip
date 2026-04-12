@@ -11,8 +11,9 @@ const __dirname = path.dirname(__filename);
 import iconv from "iconv-lite";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const pdfLib = require("pdf-parse");
-const pdf = typeof pdfLib === 'function' ? pdfLib : (pdfLib && typeof pdfLib.default === 'function' ? pdfLib.default : pdfLib);
+const pdfParse = require("pdf-parse");
+// Handle different export patterns for pdf-parse
+const pdf = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
 import { PDFDocument } from "pdf-lib";
 
 async function startServer() {
