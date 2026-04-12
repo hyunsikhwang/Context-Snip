@@ -94,6 +94,11 @@ async function startServer() {
         "경과조치 후"
       ];
       
+      // Optimization: Pre-compile regex for speed
+      const keywordRegexes = searchKeywords.map(kw => 
+        new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+      );
+      
       await safePdf(buffer, {
         pagerender: (pageData: any) => {
           return pageData.getTextContent().then((textContent: any) => {
@@ -101,9 +106,7 @@ async function startServer() {
             pageTexts.set(pageData.pageIndex + 1, text);
             
             let score = 0;
-            searchKeywords.forEach((kw: string) => {
-              // Use regex for better matching
-              const regex = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+            keywordRegexes.forEach((regex) => {
               const matches = text.match(regex);
               if (matches) score += matches.length;
             });
@@ -129,22 +132,31 @@ async function startServer() {
       const sortedRelevantPages = Array.from(pageScores.entries())
         .sort((a, b) => b[1] - a[1]);
       
+      if (sortedRelevantPages.length === 0) {
+        return res.json({ base64, optimized: false, message: "No relevant content found." });
+      }
+
+      const maxScore = sortedRelevantPages[0][1];
       const pagesToExtract = new Set<number>();
       
-      // Take top 8 most relevant pages
-      const topPages = sortedRelevantPages.slice(0, 8).map(entry => entry[0]);
+      // Strategy: Take top 5 most relevant pages, but only if they have at least 20% of the max score
+      // This filters out noise and focuses on the most likely table locations.
+      const topPages = sortedRelevantPages
+        .filter(entry => entry[1] >= maxScore * 0.2)
+        .slice(0, 5)
+        .map(entry => entry[0]);
       
       topPages.forEach(p => {
         const idx = p - 1;
         pagesToExtract.add(idx);
-        // Add one page after as tables often span multiple pages
+        // Add one page after (tables often span 2 pages)
         if (idx < totalPages - 1) pagesToExtract.add(idx + 1);
-        // Proactively add one page before for context if it's not already there
+        // Context page before
         if (idx > 0) pagesToExtract.add(idx - 1);
       });
 
-      // Limit to 15 pages total to keep token usage low and processing fast
-      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 15);
+      // Limit to 10 pages total (Surgical selection saves ~33% tokens vs 15 pages)
+      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 10);
       
       // Collect text from final pages to check if it's searchable
       let combinedText = "";
