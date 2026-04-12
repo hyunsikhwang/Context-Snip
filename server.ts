@@ -13,7 +13,15 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
 // Handle different export patterns for pdf-parse
-const pdf = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
+let pdf: any;
+if (typeof pdfParse === 'function') {
+  pdf = pdfParse;
+} else if (pdfParse && typeof pdfParse.default === 'function') {
+  pdf = pdfParse.default;
+} else {
+  // If it's still not a function, try to find any function in the object
+  pdf = pdfParse; 
+}
 import { PDFDocument } from "pdf-lib";
 
 async function startServer() {
@@ -32,47 +40,72 @@ async function startServer() {
     try {
       const buffer = Buffer.from(base64, 'base64');
       
+      if (typeof pdf !== 'function') {
+        console.error("PDF function is not a function. Type:", typeof pdf, "Value:", pdf);
+        return res.json({ base64, optimized: false, message: "PDF library loading error." });
+      }
+
       // 1. Identify relevant pages using pdf-parse
-      const relevantPages = new Set<number>();
+      const pageScores = new Map<number, number>();
       const searchKeywords = keywords || ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "경과조치"];
       
       await pdf(buffer, {
         pagerender: (pageData: any) => {
           return pageData.getTextContent().then((textContent: any) => {
             const text = textContent.items.map((item: any) => item.str).join(" ");
-            const hasKeyword = searchKeywords.some((kw: string) => text.includes(kw));
-            if (hasKeyword) {
-              relevantPages.add(pageData.pageIndex + 1); // pdf-lib uses 0-based or 1-based? Let's check. pdf-lib uses 0-based for indices.
+            let score = 0;
+            searchKeywords.forEach((kw: string) => {
+              if (text.includes(kw)) score += 1;
+            });
+            
+            if (score > 0) {
+              pageScores.set(pageData.pageIndex + 1, score);
             }
             return text;
           });
         }
       });
 
-      if (relevantPages.size === 0) {
-        // If no keywords found, maybe it's a scanned PDF or keywords are slightly different.
-        // Return original or first few pages? 
-        // For now, let's return original if nothing found to avoid breaking flow.
+      if (pageScores.size === 0) {
         return res.json({ base64, optimized: false, message: "No keywords found, returning original." });
       }
 
       // 2. Extract pages using pdf-lib
       const srcDoc = await PDFDocument.load(buffer);
       const pdfDoc = await PDFDocument.create();
-      
-      // Add a buffer of 1 page before and after for context
-      const pagesToExtract = new Set<number>();
       const totalPages = srcDoc.getPageCount();
       
-      relevantPages.forEach(p => {
+      // Sort pages by score and proximity
+      // We want to keep pages with keywords and their immediate neighbors
+      const pagesToExtract = new Set<number>();
+      
+      // Limit to top N relevant areas to keep tokens low
+      const sortedRelevantPages = Array.from(pageScores.keys()).sort((a, b) => a - b);
+      
+      // If we found too many pages, we might be hitting footers. 
+      // Let's limit to the most relevant ones (highest score) if it exceeds a threshold.
+      let targetPages = sortedRelevantPages;
+      if (sortedRelevantPages.length > 10) {
+        targetPages = Array.from(pageScores.entries())
+          .sort((a, b) => b[1] - a[1]) // Sort by score descending
+          .slice(0, 10) // Take top 10 scoring pages
+          .map(entry => entry[0])
+          .sort((a, b) => a - b);
+      }
+
+      targetPages.forEach(p => {
         const idx = p - 1;
-        if (idx > 0) pagesToExtract.add(idx - 1);
+        // Add current page and 1 page after (tables often span 2 pages)
         pagesToExtract.add(idx);
         if (idx < totalPages - 1) pagesToExtract.add(idx + 1);
+        // Also add 1 page before just in case
+        if (idx > 0) pagesToExtract.add(idx - 1);
       });
 
-      const sortedPages = Array.from(pagesToExtract).sort((a, b) => a - b);
-      const copiedPages = await pdfDoc.copyPages(srcDoc, sortedPages);
+      // Final safety limit: never send more than 20 pages
+      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 20);
+      
+      const copiedPages = await pdfDoc.copyPages(srcDoc, finalPages);
       copiedPages.forEach(page => pdfDoc.addPage(page));
 
       const optimizedPdfBytes = await pdfDoc.save();
@@ -82,8 +115,8 @@ async function startServer() {
         base64: optimizedBase64, 
         optimized: true, 
         originalPageCount: totalPages,
-        optimizedPageCount: sortedPages.length,
-        extractedPages: sortedPages.map(p => p + 1)
+        optimizedPageCount: finalPages.length,
+        extractedPages: finalPages.map(p => p + 1)
       });
     } catch (error: any) {
       console.error("PDF optimization error:", error);
@@ -101,6 +134,9 @@ async function startServer() {
 
     try {
       const buffer = Buffer.from(base64, 'base64');
+      if (typeof pdf !== 'function') {
+        throw new Error("PDF library loading error");
+      }
       const data = await pdf(buffer);
       res.json({ text: data.text });
     } catch (error: any) {

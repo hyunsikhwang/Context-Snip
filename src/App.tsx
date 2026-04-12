@@ -247,7 +247,7 @@ export default function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
               base64: file.base64,
-              keywords: ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "경과조치", "경영지표"]
+              keywords: ["보험금 예실차비율", "지급여력비율", "K-ICS", "최적가정", "공통적용 경과조치"]
             })
           });
           
@@ -265,29 +265,41 @@ export default function App() {
           console.error("Optimization failed, continuing with original:", optErr);
         }
 
-        // --- 1. Extract Loss Ratio Data ---
+        // --- 1. Combined Extraction (Loss Ratio & Solvency Ratio) ---
         try {
-          setProcessingStatus(`손해율 데이터 추출 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
+          setProcessingStatus(`데이터 추출 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
 
           const model = selectedModel;
           
-          const prompt = `업로드된 PDF 파일 내용 중 '4-6-4) 최적가정 - ① 보험금 예실차비율' 에 있는 테이블을 아래의 layout 으로 추출해서 출력해주세요. 
-[주의사항]
-1. 반드시 마크다운 테이블 형식으로만 출력하세요.
-2. 테이블 외의 어떠한 설명, 인사말, 주석, 분석 메시지도 포함하지 마세요. 오직 테이블 데이터만 출력하세요.
-3. 테이블 주석 등의 내용은 생략해주세요.
-4. 숫자 뒤의 '%' 기호는 모두 제거하고 숫자만 출력하세요. (예: 12.3% -> 12.3)
-5. 수치 데이터에서 "+" 기호는 제거하세요. (예: +1.2 -> 1.2)
-6. 괄호로 표시된 음수(예: (1.2))는 마이너스 기호로 변환하세요. (예: (1.2) -> -1.2)
-7. '구분(연도)' 컬럼에서 숫자 뒤의 '년' 문자는 제거하고 숫자만 출력하세요. (예: 2023년 -> 2023)
+          const combinedPrompt = `업로드된 PDF 파일에서 다음 두 가지 테이블을 각각 추출해주세요.
 
-[table layout]
-|구분(연도)|회사명|예상손해율|실제손해율|보험금예실차비율|`;
+1. 보험금 예실차비율 테이블
+- 위치: '4-6-4) 최적가정 - ① 보험금 예실차비율' 섹션
+- 레이아웃: |구분(연도)|회사명|예상손해율|실제손해율|보험금예실차비율|
+- 주의: 숫자 뒤의 '%' 기호 제거, '+' 기호 제거, 괄호 음수(예: (1.2))는 마이너스(-)로 변환, '년' 문자 제거.
+
+2. 지급여력비율 테이블
+- 위치: '5-2. 지급여력비율' 또는 '공통적용 경과조치 관련' 섹션
+- 레이아웃: |회사명|구분(경과조치)|지급여력비율|지급여력금액|기본자본|보완자본|지급여력기준금액|
+- 주의: "경과조치 전"과 "경과조치 후" 데이터를 각각 행으로 구분, 숫자 뒤의 '%' 기호 제거, '+' 기호 제거, 괄호 음수나 '△'는 마이너스(-)로 변환.
+
+[출력 형식]
+반드시 아래 형식을 엄격히 지켜주세요. 테이블 외의 설명은 절대 포함하지 마세요.
+
+### LOSS_RATIO_TABLE
+|구분(연도)|회사명|예상손해율|실제손해율|보험금예실차비율|
+|---|---|---|---|---|
+...데이터...
+
+### SOLVENCY_RATIO_TABLE
+|회사명|구분(경과조치)|지급여력비율|지급여력금액|기본자본|보완자본|지급여력기준금액|
+|---|---|---|---|---|---|---|
+...데이터...`;
 
           const contents = [
             {
               parts: [
-                { text: prompt },
+                { text: combinedPrompt },
                 {
                   inlineData: {
                     data: file.base64,
@@ -304,7 +316,7 @@ export default function App() {
               model,
               contents,
               config: {
-                systemInstruction: "You are a data extraction specialist. Extract only the requested table data in markdown format. Do not provide any conversational text, explanations, or metadata. Be precise and concise.",
+                systemInstruction: "You are a professional data extractor. Extract the requested tables from the PDF and output them in the specified markdown format. Do not include any other text.",
                 thinkingConfig: {
                   thinkingLevel: model.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
                 },
@@ -315,10 +327,9 @@ export default function App() {
           } catch (apiErr: any) {
             const errMessage = apiErr.message || (apiErr.error?.message) || String(apiErr);
             const errStr = JSON.stringify(apiErr);
-            console.log("Gemini API Error details (Loss Ratio):", { errMessage, errStr });
-
+            
             if (errMessage.includes("token") || errMessage.includes("limit") || errMessage.includes("1048576") || errMessage.includes("INVALID_ARGUMENT") || errStr.includes("token") || errStr.includes("limit") || errStr.includes("1048576") || errStr.includes("INVALID_ARGUMENT")) {
-              setProcessingStatus(`토큰 초과 (손해율): ${file.name} (텍스트 추출 모드)`);
+              setProcessingStatus(`토큰 초과: ${file.name} (텍스트 추출 모드)`);
               const textRes = await fetch("/api/extract-text", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -329,9 +340,9 @@ export default function App() {
               if (textData.text) {
                 response = await genAI.models.generateContent({
                   model,
-                  contents: [{ parts: [{ text: `아래 텍스트에서 정보를 추출해주세요.\n\n${prompt}\n\n[텍스트 내용]\n${textData.text.substring(0, 800000)}` }] }],
+                  contents: [{ parts: [{ text: `아래 텍스트에서 정보를 추출해주세요.\n\n${combinedPrompt}\n\n[텍스트 내용]\n${textData.text.substring(0, 800000)}` }] }],
                   config: {
-                    systemInstruction: "You are a data extraction specialist. Extract only the requested table data in markdown format.",
+                    systemInstruction: "You are a professional data extractor. Extract the requested tables from the text.",
                     thinkingConfig: { thinkingLevel: model.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW },
                     maxOutputTokens: 16384,
                   },
@@ -343,153 +354,78 @@ export default function App() {
 
           const result = response.text;
           if (result) {
-            setExtractedTable((prev) => {
-              const cleanTableLine = (line: string) => {
-                if (!line.includes('|')) return line;
-                const cells = line.split('|');
-                const cleanedCells = cells.map((cell, index) => {
-                  const trimmed = cell.trim();
-                  if (trimmed === "" || trimmed.includes('---')) return cell;
-                  if (index === 1) return ` ${trimmed.replace(/년/g, '').trim()} `;
-                  if (index >= 3) return ` ${trimmed.replace(/%/g, '').replace(/\+/g, '').replace(/\(([\d.]+)\)/g, '-$1').replace(/△/g, '-').trim()} `;
-                  return cell;
-                });
-                return cleanedCells.join('|');
-              };
-              const newLines = result.trim().split('\n');
-              let dataStartIndex = 0;
-              let foundHeader = false;
-              let foundSeparator = false;
-              for (let j = 0; j < newLines.length; j++) {
-                const line = newLines[j].trim();
-                if (!line) continue;
-                if (!foundHeader && (line.includes('구분(연도)') || line.includes('회사명'))) { foundHeader = true; continue; }
-                if (foundHeader && !foundSeparator && (line.includes('|---|') || line.includes('|:---:|'))) { foundSeparator = true; dataStartIndex = j + 1; break; }
-                if (line.startsWith('|') && line.split('|').length > 3 && !line.includes('---')) { dataStartIndex = j; break; }
-              }
-              const dataLines = newLines.slice(dataStartIndex).filter(l => {
-                const trimmed = l.trim();
-                return trimmed !== "" && !trimmed.includes('|---|') && !trimmed.includes('|:---:|') && !trimmed.includes('구분(연도)') && !trimmed.includes('회사명');
-              }).map(l => cleanTableLine(l));
-              if (dataLines.length === 0) return prev;
-              return prev ? prev + "\n" + dataLines.join('\n') : result.trim().split('\n').slice(0, dataStartIndex).join('\n') + "\n" + dataLines.join('\n');
-            });
-          }
-        } catch (err: any) {
-          console.error(`Loss Ratio extraction error for ${file.name}:`, err);
-          setErrorLog(prev => [...prev, `[손해율 추출 실패] ${file.name}: ${err.message}`]);
-        }
+            // Parse combined result
+            const lossRatioMatch = result.match(/### LOSS_RATIO_TABLE\n([\s\S]*?)(?=\n### SOLVENCY_RATIO_TABLE|$)/);
+            const solvencyMatch = result.match(/### SOLVENCY_RATIO_TABLE\n([\s\S]*)/);
 
-        // --- 2. Extract Solvency Ratio (K-ICS) Data ---
-        try {
-          setProcessingStatus(`지급여력비율 데이터 추출 중 (${i + 1}/${targetFiles.length}): ${file.name}`);
-          
-          const solvencyPrompt = `업로드된 PDF 파일 내용 중 '5. 경영지표 > 5-2. 지급여력비율 > 지급여력비율의 경과조치 적용에 관한 세부 사항 > 지급여력비율의 경과조치 적용에 관한 사항 > 공통적용 경과조치 관련' 에 있는 테이블을 아래의 layout 으로 추출해서 출력해주세요.
-[주의사항]
-1. 반드시 마크다운 테이블 형식으로만 출력하세요.
-2. 테이블 외의 어떠한 설명, 인사말, 주석, 분석 메시지도 포함하지 마세요. 오직 테이블 데이터만 출력하세요.
-3. "경과조치 전"과 "경과조치 후" 데이터를 각각 행으로 구분하여 추출하세요.
-4. 숫자 뒤의 '%' 기호는 모두 제거하고 숫자만 출력하세요.
-5. 수치 데이터에서 "+" 기호는 제거하고, 괄호 음수(예: (1.2))나 '△'는 마이너스 기호(-)로 변환하세요.
-6. 금액 단위가 있는 경우 숫자만 추출하세요.
-
-[table layout]
-|회사명|구분(경과조치)|지급여력비율|지급여력금액|기본자본|보완자본|지급여력기준금액|`;
-
-          const contents = [
-            {
-              parts: [
-                { text: solvencyPrompt },
-                { inlineData: { data: file.base64, mimeType: file.mimeType } },
-              ],
-            },
-          ];
-
-          let response;
-          try {
-            response = await genAI.models.generateContent({
-              model: selectedModel,
-              contents,
-              config: {
-                systemInstruction: "You are a data extraction specialist. Extract only the requested table data in markdown format.",
-                thinkingConfig: { thinkingLevel: selectedModel.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW },
-                maxOutputTokens: 16384,
-              },
-            });
-            updateUsage(response);
-          } catch (apiErr: any) {
-            const errMessage = apiErr.message || (apiErr.error?.message) || String(apiErr);
-            const errStr = JSON.stringify(apiErr);
-            if (errMessage.includes("token") || errMessage.includes("limit") || errMessage.includes("1048576") || errMessage.includes("INVALID_ARGUMENT") || errStr.includes("token") || errStr.includes("limit") || errStr.includes("1048576") || errStr.includes("INVALID_ARGUMENT")) {
-              setProcessingStatus(`토큰 초과 (지급여력): ${file.name} (텍스트 추출 모드)`);
-              const textRes = await fetch("/api/extract-text", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ base64: file.base64 })
+            const cleanTableLine = (line: string, type: 'loss' | 'solvency') => {
+              if (!line.includes('|')) return line;
+              const cells = line.split('|');
+              const cleanedCells = cells.map((cell, index) => {
+                const trimmed = cell.trim();
+                if (trimmed === "" || trimmed.includes('---')) return cell;
+                
+                // Common cleaning
+                let val = trimmed.replace(/%/g, '').replace(/\+/g, '').replace(/\(([\d.]+)\)/g, '-$1').replace(/△/g, '-').replace(/년/g, '').trim();
+                
+                if (type === 'loss' && index === 1) return ` ${val} `;
+                if (type === 'loss' && index >= 3) return ` ${val} `;
+                if (type === 'solvency' && index >= 3) return ` ${val} `;
+                
+                return ` ${val} `;
               });
-              if (!textRes.ok) throw apiErr;
-              const textData = await textRes.json();
-              if (textData.text) {
-                response = await genAI.models.generateContent({
-                  model: selectedModel,
-                  contents: [{ parts: [{ text: `아래 텍스트에서 정보를 추출해주세요.\n\n${solvencyPrompt}\n\n[텍스트 내용]\n${textData.text.substring(0, 800000)}` }] }],
-                  config: {
-                    systemInstruction: "You are a data extraction specialist. Extract only the requested table data in markdown format.",
-                    thinkingConfig: { thinkingLevel: selectedModel.includes("lite") ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW },
-                    maxOutputTokens: 16384,
-                  },
-                });
-                updateUsage(response);
-              } else throw apiErr;
-            } else throw apiErr;
-          }
+              return cleanedCells.join('|');
+            };
 
-          const result = response.text;
-          if (result) {
-            setExtractedSolvencyTable((prev) => {
-              const cleanTableLine = (line: string) => {
-                if (!line.includes('|')) return line;
-                const cells = line.split('|');
-                const cleanedCells = cells.map((cell, index) => {
-                  const trimmed = cell.trim();
-                  if (trimmed === "" || trimmed.includes('---')) return cell;
-                  // Clean numeric data columns (Index 2 onwards)
-                  if (index >= 2) {
-                    let cleaned = trimmed
-                      .replace(/%/g, '')
-                      .replace(/\+/g, '')
-                      .replace(/\(([\d,.]+)\)/g, '-$1')
-                      .replace(/△/g, '-')
-                      .replace(/,/g, '')
-                      .trim();
-                    return ` ${cleaned} `;
+            if (lossRatioMatch && lossRatioMatch[1]) {
+              const tableContent = lossRatioMatch[1].trim();
+              setExtractedTable((prev) => {
+                const newLines = tableContent.split('\n');
+                let dataStartIndex = 0;
+                for (let j = 0; j < newLines.length; j++) {
+                  const line = newLines[j].trim();
+                  if (line.startsWith('|') && !line.includes('---') && !line.includes('구분(연도)') && !line.includes('회사명')) {
+                    dataStartIndex = j;
+                    break;
                   }
-                  return cell;
-                });
-                return cleanedCells.join('|');
-              };
-              const newLines = result.trim().split('\n');
-              let dataStartIndex = 0;
-              let foundHeader = false;
-              let foundSeparator = false;
-              for (let j = 0; j < newLines.length; j++) {
-                const line = newLines[j].trim();
-                if (!line) continue;
-                if (!foundHeader && (line.includes('회사명') || line.includes('지급여력비율'))) { foundHeader = true; continue; }
-                if (foundHeader && !foundSeparator && (line.includes('|---|') || line.includes('|:---:|'))) { foundSeparator = true; dataStartIndex = j + 1; break; }
-                if (line.startsWith('|') && line.split('|').length > 3 && !line.includes('---')) { dataStartIndex = j; break; }
-              }
-              const dataLines = newLines.slice(dataStartIndex).filter(l => {
-                const trimmed = l.trim();
-                return trimmed !== "" && !trimmed.includes('|---|') && !trimmed.includes('|:---:|') && !trimmed.includes('회사명') && !trimmed.includes('지급여력비율');
-              }).map(l => cleanTableLine(l));
-              if (dataLines.length === 0) return prev;
-              return prev ? prev + "\n" + dataLines.join('\n') : result.trim().split('\n').slice(0, dataStartIndex).join('\n') + "\n" + dataLines.join('\n');
-            });
+                }
+                const dataLines = newLines.slice(dataStartIndex).filter(l => l.trim() !== "" && l.includes('|') && !l.includes('---')).map(l => cleanTableLine(l, 'loss'));
+                if (dataLines.length === 0) return prev;
+                
+                if (!prev) {
+                  const header = "|구분(연도)|회사명|예상손해율|실제손해율|보험금예실차비율|\n|---|---|---|---|---|";
+                  return header + "\n" + dataLines.join('\n');
+                }
+                return prev + "\n" + dataLines.join('\n');
+              });
+            }
+
+            if (solvencyMatch && solvencyMatch[1]) {
+              const tableContent = solvencyMatch[1].trim();
+              setExtractedSolvencyTable((prev) => {
+                const newLines = tableContent.split('\n');
+                let dataStartIndex = 0;
+                for (let j = 0; j < newLines.length; j++) {
+                  const line = newLines[j].trim();
+                  if (line.startsWith('|') && !line.includes('---') && !line.includes('회사명') && !line.includes('구분(경과조치)')) {
+                    dataStartIndex = j;
+                    break;
+                  }
+                }
+                const dataLines = newLines.slice(dataStartIndex).filter(l => l.trim() !== "" && l.includes('|') && !l.includes('---')).map(l => cleanTableLine(l, 'solvency'));
+                if (dataLines.length === 0) return prev;
+
+                if (!prev) {
+                  const header = "|회사명|구분(경과조치)|지급여력비율|지급여력금액|기본자본|보완자본|지급여력기준금액|\n|---|---|---|---|---|---|---|";
+                  return header + "\n" + dataLines.join('\n');
+                }
+                return prev + "\n" + dataLines.join('\n');
+              });
+            }
           }
         } catch (err: any) {
-          console.error(`Solvency Ratio extraction error for ${file.name}:`, err);
-          setErrorLog(prev => [...prev, `[지급여력 추출 실패] ${file.name}: ${err.message}`]);
+          console.error(`Extraction error for ${file.name}:`, err);
+          setErrorLog(prev => [...prev, `[추출 실패] ${file.name}: ${err.message}`]);
         }
       }
     } catch (err: any) {
