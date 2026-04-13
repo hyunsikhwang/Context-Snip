@@ -12,52 +12,44 @@ import iconv from "iconv-lite";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
-
-// Handle pdf-lib with require to avoid ESM constructor issues
 const pdflib = require("pdf-lib");
-const PDFDocument = pdflib.PDFDocument;
+const { PDFDocument } = pdflib;
 
-// Handle different export patterns for pdf-parse
-let pdf: any;
-if (typeof pdfParse === 'function') {
-  pdf = pdfParse;
-} else if (pdfParse && typeof pdfParse.default === 'function') {
-  pdf = pdfParse.default;
-} else if (pdfParse && typeof pdfParse.pdf === 'function') {
-  pdf = pdfParse.pdf;
-} else if (pdfParse && pdfParse.__esModule && typeof pdfParse.default === 'function') {
-  pdf = pdfParse.default;
-} else {
-  // Fallback: if it's an object, try to find any function property that might be the main entry
-  pdf = pdfParse;
-}
-
-// Ensure it's a function before calling, or fallback to a dummy that logs
 const safePdf = async (buffer: Buffer, options?: any) => {
-  let callablePdf = pdf;
-  
-  // If not a function, check common properties again at runtime
-  if (typeof callablePdf !== 'function' && callablePdf !== null && typeof callablePdf === 'object') {
-    if (typeof callablePdf.default === 'function') callablePdf = callablePdf.default;
-    else if (typeof callablePdf.pdf === 'function') callablePdf = callablePdf.pdf;
-    else {
-      // Last resort: find the first function in the object
-      const firstFuncKey = Object.keys(callablePdf).find(key => typeof callablePdf[key] === 'function');
-      if (firstFuncKey) callablePdf = callablePdf[firstFuncKey];
-    }
-  }
-
-  if (typeof callablePdf !== 'function') {
-    console.error("PDF library failure. Module structure:", JSON.stringify(Object.keys(pdfParse)));
-    throw new Error("PDF library initialization failed: The loaded module is not a function.");
-  }
-  
   try {
-    return await callablePdf(buffer, options);
-  } catch (err) {
+    let pdfFunc = pdfParse;
+    
+    // Robust check for various export patterns
+    if (typeof pdfFunc !== 'function') {
+      if (pdfFunc && typeof pdfFunc.default === 'function') {
+        pdfFunc = pdfFunc.default;
+      } else if (pdfFunc && typeof pdfFunc.pdf === 'function') {
+        pdfFunc = pdfFunc.pdf;
+      } else if (pdfFunc && pdfFunc.__esModule && typeof pdfFunc.default === 'function') {
+        pdfFunc = pdfFunc.default;
+      }
+    }
+
+    if (typeof pdfFunc !== 'function') {
+      // If we still can't find a function, try to find ANY function in the object
+      const firstFuncKey = Object.keys(pdfFunc || {}).find(k => typeof (pdfFunc as any)[k] === 'function');
+      if (firstFuncKey) {
+        pdfFunc = (pdfFunc as any)[firstFuncKey];
+      } else {
+        throw new Error("pdf-parse is not a function");
+      }
+    }
+    
+    return await pdfFunc(buffer, options);
+  } catch (err: any) {
+    const errStr = String(err);
+    // Handle specific PDF exceptions mentioned by user
+    if (errStr.includes('Password') || errStr.includes('Invalid') || errStr.includes('Format') || errStr.includes('Abort') || errStr.includes('Exception')) {
+      console.warn(`Handled PDF Exception in safePdf: ${errStr}`);
+      return { text: "", pages: [], numpages: 0, info: {} };
+    }
     console.error("pdf-parse error:", err);
-    // Fallback: return empty text if pdf-parse fails
-    return { text: "" };
+    return { text: "", pages: [], numpages: 0, info: {} };
   }
 };
 
@@ -81,50 +73,63 @@ async function startServer() {
       const pageScores = new Map<number, number>();
       const pageTexts = new Map<number, string>();
       const searchKeywords = keywords || [
-        "보험금 예실차비율", 
-        "지급여력비율", 
-        "K-ICS", 
-        "최적가정", 
-        "공통적용 경과조치", 
-        "손해율", 
-        "가용자본", 
-        "요구자본",
-        "보험금예실차",
-        "경과조치 전",
-        "경과조치 후"
+        { term: "4-6-4) 최적가정", weight: 10 },
+        { term: "5-2. 지급여력비율", weight: 10 },
+        { term: "공통적용 경과조치", weight: 5 },
+        { term: "선택적용 경과조치", weight: 5 },
+        { term: "보험금 예실차비율", weight: 3 },
+        { term: "지급여력비율", weight: 2 },
+        { term: "K-ICS", weight: 2 },
+        { term: "자본감소분", weight: 3 },
+        { term: "보험금예실차", weight: 2 },
+        { term: "경과조치 전", weight: 2 },
+        { term: "경과조치 후", weight: 2 }
       ];
       
       // Optimization: Pre-compile regex for speed
-      const keywordRegexes = searchKeywords.map(kw => 
-        new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-      );
+      const keywordRegexes = searchKeywords.map(kw => ({
+        regex: new RegExp(kw.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+        weight: kw.weight
+      }));
       
-      await safePdf(buffer, {
-        pagerender: (pageData: any) => {
-          return pageData.getTextContent().then((textContent: any) => {
-            const text = textContent.items.map((item: any) => item.str).join(" ");
-            pageTexts.set(pageData.pageIndex + 1, text);
-            
-            let score = 0;
-            keywordRegexes.forEach((regex) => {
-              const matches = text.match(regex);
-              if (matches) score += matches.length;
+      try {
+        await safePdf(buffer, {
+          pagerender: (pageData: any) => {
+            return pageData.getTextContent().then((textContent: any) => {
+              const text = textContent.items.map((item: any) => item.str).join(" ");
+              pageTexts.set(pageData.pageIndex + 1, text);
+              
+              let score = 0;
+              keywordRegexes.forEach((kw) => {
+                const matches = text.match(kw.regex);
+                if (matches) score += matches.length * kw.weight;
+              });
+              
+              if (score > 0) {
+                pageScores.set(pageData.pageIndex + 1, score);
+              }
+              return text;
             });
-            
-            if (score > 0) {
-              pageScores.set(pageData.pageIndex + 1, score);
-            }
-            return text;
-          });
-        }
-      });
+          }
+        });
+      } catch (safePdfErr: any) {
+        console.warn("safePdf failed in optimization:", safePdfErr.message);
+        return res.json({ base64, optimized: false, message: `PDF Parse Error: ${safePdfErr.message}` });
+      }
 
       if (pageScores.size === 0) {
         return res.json({ base64, optimized: false, message: "No keywords found, returning original." });
       }
 
       // 2. Extract pages using pdf-lib
-      const srcDoc = await PDFDocument.load(buffer);
+      let srcDoc;
+      try {
+        srcDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+      } catch (loadErr: any) {
+        console.warn("pdf-lib load error:", loadErr.message);
+        return res.json({ base64, optimized: false, message: `PDF Load Error: ${loadErr.message}` });
+      }
+
       const pdfDoc = await PDFDocument.create();
       const totalPages = srcDoc.getPageCount();
       
@@ -136,27 +141,24 @@ async function startServer() {
         return res.json({ base64, optimized: false, message: "No relevant content found." });
       }
 
-      const maxScore = sortedRelevantPages[0][1];
       const pagesToExtract = new Set<number>();
       
-      // Strategy: Take top 5 most relevant pages, but only if they have at least 20% of the max score
-      // This filters out noise and focuses on the most likely table locations.
-      const topPages = sortedRelevantPages
-        .filter(entry => entry[1] >= maxScore * 0.2)
-        .slice(0, 5)
-        .map(entry => entry[0]);
+      // Strategy: Take top 4 most relevant pages (Reduced from 5 for token efficiency)
+      // Focus on high-weight matches
+      const topPages = sortedRelevantPages.slice(0, 4).map(entry => entry[0]);
       
       topPages.forEach(p => {
         const idx = p - 1;
         pagesToExtract.add(idx);
         // Add one page after (tables often span 2 pages)
         if (idx < totalPages - 1) pagesToExtract.add(idx + 1);
-        // Context page before
-        if (idx > 0) pagesToExtract.add(idx - 1);
+        // Context page before ONLY if score is very high (likely section start)
+        const score = pageScores.get(p) || 0;
+        if (idx > 0 && score > 15) pagesToExtract.add(idx - 1);
       });
 
-      // Limit to 10 pages total (Surgical selection saves ~33% tokens vs 15 pages)
-      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 10);
+      // Limit to 8 pages total (Reduced from 10 to save ~20% tokens)
+      const finalPages = Array.from(pagesToExtract).sort((a, b) => a - b).slice(0, 8);
       
       // Collect text from final pages to check if it's searchable
       let combinedText = "";
